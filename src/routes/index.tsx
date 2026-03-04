@@ -11,10 +11,13 @@ import { formatSrt } from '../lib/srt-format.ts'
 import { formatTimecode } from '../lib/timecode.ts'
 import type { Segment, ValidationIssue } from '../lib/types'
 import { validateSegments } from '../lib/segment-validate.ts'
+import { buildGeminiPrompt } from '../lib/gemini-schema'
+import { analyzeVideo } from '../lib/gemini-client'
+import { normalizeGeminiSegments } from '../lib/gemini-normalize'
 
 export const Route = createFileRoute('/')({ component: SrtLabelingPage })
 
-const DEFAULT_LABELS = ['START', 'x', 'END']
+const DEFAULT_LABELS = ['START', 'x', 'END', 'munching start', 'munching end']
 
 const createId = () => {
   if (globalThis.crypto && 'randomUUID' in globalThis.crypto) {
@@ -54,6 +57,7 @@ function SrtLabelingPage() {
   >(null)
   const [mediaUrl, setMediaUrl] = useState<string | null>(null)
   const [mediaName, setMediaName] = useState<string | null>(null)
+  const [mediaFile, setMediaFile] = useState<File | null>(null)
   const [duration, setDuration] = useState<number | null>(null)
   const [currentTime, setCurrentTime] = useState(0)
   const [isPlaying, setIsPlaying] = useState(false)
@@ -63,6 +67,10 @@ function SrtLabelingPage() {
     segments[0]?.id ?? null
   )
   const [pixelsPerSecond, setPixelsPerSecond] = useState(100)
+  const [analysisStatus, setAnalysisStatus] = useState<'idle' | 'loading' | 'error'>('idle')
+  const [analysisError, setAnalysisError] = useState<string | null>(null)
+  const [analysisMeta, setAnalysisMeta] = useState<string | null>(null)
+  const [suggestedSegments, setSuggestedSegments] = useState<Segment[]>([])
 
   useEffect(() => {
     const media = mediaRef.current
@@ -192,6 +200,7 @@ function SrtLabelingPage() {
     const url = URL.createObjectURL(file)
     setMediaUrl(url)
     setMediaName(file.name)
+    setMediaFile(file)
   }
 
   const handleLoadClick = () => {
@@ -211,9 +220,57 @@ function SrtLabelingPage() {
     setDuration(null)
     setMediaUrl(null)
     setMediaName(null)
+    setMediaFile(null)
+    setAnalysisStatus('idle')
+    setAnalysisError(null)
+    setAnalysisMeta(null)
+    setSuggestedSegments([])
     if (fileInputRef.current) {
       fileInputRef.current.value = ''
     }
+  }
+
+  const handleAnalyze = useCallback(async () => {
+    if (!mediaFile) {
+      return
+    }
+    setAnalysisStatus('loading')
+    setAnalysisError(null)
+    setAnalysisMeta(null)
+    try {
+      const prompt = buildGeminiPrompt(labels)
+      const result = await analyzeVideo(mediaFile, prompt)
+      const normalized = normalizeGeminiSegments(result.segments, duration, {
+        labels,
+        defaultLabel: 'x',
+      })
+      setSuggestedSegments(normalized)
+      if (result.meta?.totalDurationSec) {
+        const metaLine = `Gemini analyzed up to ${result.meta.lastEndSec ?? 0}s of ${result.meta.totalDurationSec}s.`
+        setAnalysisMeta(result.meta.coverageNotes ? `${metaLine} ${result.meta.coverageNotes}` : metaLine)
+      }
+      setAnalysisStatus('idle')
+    } catch (error) {
+      const message =
+        typeof error === 'object' && error && 'message' in error
+          ? String((error as { message?: string }).message)
+          : 'Gemini analysis failed.'
+      setAnalysisError(message)
+      setAnalysisStatus('error')
+    }
+  }, [mediaFile, labels, duration])
+
+  const handleApplySuggestions = () => {
+    if (suggestedSegments.length === 0) {
+      return
+    }
+    setSegments(suggestedSegments)
+    setSelectedSegmentId(suggestedSegments[0]?.id ?? null)
+    setSuggestedSegments([])
+  }
+
+  const handleDismissSuggestions = () => {
+    setSuggestedSegments([])
   }
 
   const handlePlayToggle = useCallback(() => {
@@ -527,7 +584,7 @@ function SrtLabelingPage() {
                 ref={fileInputRef}
                 type="file"
                 className="sr-only"
-                accept="video/*,audio/*"
+                accept="video/*"
                 onChange={handleFileChange}
               />
               {mediaUrl ? (
@@ -559,6 +616,13 @@ function SrtLabelingPage() {
                 disabled={!mediaUrl}
               >
                 {isPlaying ? 'Pause' : 'Play'}
+              </button>
+              <button
+                className="ghost-button"
+                onClick={handleAnalyze}
+                disabled={!mediaFile || analysisStatus === 'loading'}
+              >
+                {analysisStatus === 'loading' ? 'Analyzing...' : 'Auto analyze'}
               </button>
               <button
                 className="ghost-button"
@@ -672,6 +736,29 @@ function SrtLabelingPage() {
                 </div>
               ) : (
                 <div className="media-placeholder">Select a segment to edit.</div>
+              )}
+            </div>
+
+            <div>
+              <div className="section-title">Auto suggestions</div>
+              {analysisStatus === 'error' && analysisError ? (
+                <div className="srt-preview mono">{analysisError}</div>
+              ) : null}
+              {analysisMeta ? <div className="srt-preview mono">{analysisMeta}</div> : null}
+              {suggestedSegments.length > 0 ? (
+                <div className="layout-stack">
+                  <div className="srt-preview mono">{formatSrt(suggestedSegments)}</div>
+                  <div className="label-inline">
+                    <button className="primary-button" onClick={handleApplySuggestions}>
+                      Apply suggestions
+                    </button>
+                    <button className="ghost-button" onClick={handleDismissSuggestions}>
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="media-placeholder">No suggestions yet.</div>
               )}
             </div>
 
