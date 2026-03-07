@@ -147,14 +147,20 @@ function SrtLabelingPage() {
     }
   }, [mediaUrl])
 
-  const activeSegmentId = useMemo(() => {
-    if (!isPlaying && selectedSegmentId) {
-      return selectedSegmentId
+  useEffect(() => {
+    const match = segments.find(
+      (s) => currentTime >= s.startSec && currentTime <= s.endSec
+    )
+    if (match) {
+      setSelectedSegmentId(match.id)
     }
+  }, [currentTime, segments])
+
+  const activeSegmentId = useMemo(() => {
     return segments.find(
       (segment) => currentTime >= segment.startSec && currentTime <= segment.endSec
-    )?.id
-  }, [currentTime, isPlaying, segments, selectedSegmentId])
+    )?.id ?? selectedSegmentId ?? null
+  }, [currentTime, segments, selectedSegmentId])
 
   const issues: ValidationIssue[] = useMemo(
     () => validateSegments(segments, labels, duration ?? undefined),
@@ -172,6 +178,17 @@ function SrtLabelingPage() {
     [segments, activeSegmentId]
   )
   const inspectorSegment = activeSegment ?? selectedSegment
+
+  const sortedSegments = useMemo(
+    () => [...segments].sort((a, b) => a.startSec - b.startSec || a.endSec - b.endSec),
+    [segments]
+  )
+
+  const prevSegmentOfInspector = useMemo(() => {
+    if (!inspectorSegment) return null
+    const idx = sortedSegments.findIndex((s) => s.id === inspectorSegment.id)
+    return idx > 0 ? sortedSegments[idx - 1] : null
+  }, [sortedSegments, inspectorSegment])
 
   const timelineTicks = useMemo(() => {
     if (!duration || !Number.isFinite(duration) || duration <= 0) {
@@ -422,35 +439,21 @@ function SrtLabelingPage() {
           }
 
           if (dragState.type === 'start') {
-            const minStart = prevSegment ? prevSegment.startSec + minGap : 0
+            const minStart = prevSegment ? prevSegment.endSec : 0
             const nextStart = Math.min(
               Math.max(minStart, dragState.startStart + deltaSeconds),
               dragState.startEnd - minGap
             )
             current.startSec = nextStart
-            if (prevSegment) {
-              const prevTarget = nextSegments.find(
-                (segment) => segment.id === prevSegment.id
-              )
-              if (prevTarget) {
-                prevTarget.endSec = nextStart
-              }
-            }
             return nextSegments
           }
 
-          const maxEnd = nextSegment ? nextSegment.endSec - minGap : dragState.duration
+          const maxEnd = nextSegment ? nextSegment.startSec : dragState.duration
           const nextEnd = Math.max(
             Math.min(maxEnd, dragState.startEnd + deltaSeconds),
             dragState.startStart + minGap
           )
           current.endSec = nextEnd
-          if (nextSegment) {
-            const nextTarget = nextSegments.find((segment) => segment.id === nextSegment.id)
-            if (nextTarget) {
-              nextTarget.startSec = nextEnd
-            }
-          }
           return nextSegments
         }
       )
@@ -554,6 +557,22 @@ function SrtLabelingPage() {
         handlePlayToggle()
         return
       }
+      if (event.metaKey && event.code === 'ArrowRight') {
+        event.preventDefault()
+        const idx = sortedSegments.findIndex((s) => s.id === selectedSegmentId)
+        if (idx >= 0 && idx < sortedSegments.length - 1) {
+          setSelectedSegmentId(sortedSegments[idx + 1].id)
+        }
+        return
+      }
+      if (event.metaKey && event.code === 'ArrowLeft') {
+        event.preventDefault()
+        const idx = sortedSegments.findIndex((s) => s.id === selectedSegmentId)
+        if (idx > 0) {
+          setSelectedSegmentId(sortedSegments[idx - 1].id)
+        }
+        return
+      }
       if (event.code === 'ArrowLeft') {
         event.preventDefault()
         const step = event.shiftKey ? 0.01 : 0.05
@@ -569,7 +588,16 @@ function SrtLabelingPage() {
     return () => {
       window.removeEventListener('keydown', handleKeyDown)
     }
-  }, [currentTime, handlePlayToggle, handleSeek])
+  }, [currentTime, handlePlayToggle, handleSeek, sortedSegments, selectedSegmentId])
+
+  useEffect(() => {
+    if (!selectedSegmentId || !laneRef.current) return
+    const idx = sortedSegments.findIndex((s) => s.id === selectedSegmentId)
+    if (idx < 0) return
+    const prevSegment = idx > 0 ? sortedSegments[idx - 1] : null
+    const scrollTarget = prevSegment ? prevSegment.startSec * pixelsPerSecond : 0
+    laneRef.current.scrollLeft = scrollTarget
+  }, [selectedSegmentId, sortedSegments, pixelsPerSecond])
 
   return (
     <main className="workspace">
@@ -674,6 +702,19 @@ function SrtLabelingPage() {
                         }
                       >
                         Set to playhead
+                      </button>
+                      <button
+                        type="button"
+                        className="ghost-button small"
+                        disabled={!prevSegmentOfInspector}
+                        onClick={() =>
+                          updateSegment(inspectorSegment.id, (prev) => ({
+                            ...prev,
+                            startSec: prevSegmentOfInspector!.endSec,
+                          }))
+                        }
+                      >
+                        Snap to prev end
                       </button>
                     </div>
                     <div className="readout mono">
