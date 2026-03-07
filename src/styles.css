@@ -181,6 +181,29 @@ select {
   color: var(--ink-soft);
 }
 
+.prompt-editor {
+  padding: 0.5rem 0.75rem;
+  border-top: 1px solid var(--line);
+}
+
+.prompt-textarea {
+  width: 100%;
+  resize: vertical;
+  padding: 0.5rem;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-soft);
+  color: var(--ink);
+  margin-top: 0.25rem;
+}
+
+.prompt-textarea:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
 .primary-button,
 .ghost-button {
   padding: 0.45rem 1.1rem;

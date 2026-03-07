@@ -14,6 +14,7 @@ import { validateSegments } from '../lib/segment-validate.ts'
 import { buildGeminiPrompt } from '../lib/gemini-schema'
 import { analyzeVideo } from '../lib/gemini-client'
 import { normalizeGeminiSegments } from '../lib/gemini-normalize'
+import { parseSrt } from '../lib/srt-parse'
 import { useUndoHistory } from '../lib/use-undo-history'
 
 export const Route = createFileRoute('/')({ component: SrtLabelingPage })
@@ -56,6 +57,9 @@ function SrtLabelingPage() {
       }
     | null
   >(null)
+  const srtInputRef = useRef<HTMLInputElement | null>(null)
+  const isScalingRef = useRef(false)
+  const suppressAutoScrollRef = useRef(false)
   const [mediaUrl, setMediaUrl] = useState<string | null>(null)
   const [mediaName, setMediaName] = useState<string | null>(null)
   const [mediaFile, setMediaFile] = useState<File | null>(null)
@@ -76,6 +80,7 @@ function SrtLabelingPage() {
     segments[0]?.id ?? null
   )
   const [pixelsPerSecond, setPixelsPerSecond] = useState(100)
+  const [promptText, setPromptText] = useState(() => buildGeminiPrompt(DEFAULT_LABELS))
   const [analysisStatus, setAnalysisStatus] = useState<'idle' | 'loading' | 'error'>('idle')
   const [analysisError, setAnalysisError] = useState<string | null>(null)
   const [analysisMeta, setAnalysisMeta] = useState<string | null>(null)
@@ -264,8 +269,7 @@ function SrtLabelingPage() {
     setAnalysisError(null)
     setAnalysisMeta(null)
     try {
-      const prompt = buildGeminiPrompt(labels)
-      const result = await analyzeVideo(mediaFile, prompt)
+      const result = await analyzeVideo(mediaFile, promptText)
       const normalized = normalizeGeminiSegments(result.segments, duration, {
         labels,
         defaultLabel: 'x',
@@ -284,7 +288,7 @@ function SrtLabelingPage() {
       setAnalysisError(message)
       setAnalysisStatus('error')
     }
-  }, [mediaFile, labels, duration])
+  }, [mediaFile, promptText, duration])
 
   const handleApplySuggestions = () => {
     if (suggestedSegments.length === 0) {
@@ -338,18 +342,18 @@ function SrtLabelingPage() {
   }
 
   const handleAddSegment = () => {
-    pushSegments((prev) => {
-      const sorted = [...prev].sort((a, b) => {
-        if (a.startSec === b.startSec) {
-          return a.endSec - b.endSec
-        }
-        return a.startSec - b.startSec
-      })
-      const lastEnd = sorted.length > 0 ? sorted[sorted.length - 1].endSec : currentTime
-      const next = createSegment(labels[0] ?? '', lastEnd, lastEnd + 0.5)
-      setSelectedSegmentId(next.id)
-      return [...prev, next]
-    })
+    const newStart = currentTime
+    const newEnd = currentTime + 0.1
+    const overlapping = segments.some(
+      (s) => s.startSec < newEnd && s.endSec > newStart
+    )
+    if (overlapping) {
+      window.alert('Cannot add segment: overlaps with an existing segment at the current playhead position.')
+      return
+    }
+    const next = createSegment(labels[0] ?? '', newStart, newEnd)
+    pushSegments((prev) => [...prev, next])
+    setSelectedSegmentId(next.id)
   }
 
   const handleRemoveSegment = (id: string) => {
@@ -394,6 +398,49 @@ function SrtLabelingPage() {
     anchor.click()
     URL.revokeObjectURL(url)
   }
+
+  const handleImportSrt = useCallback(() => {
+    srtInputRef.current?.click()
+  }, [])
+
+  const handleSrtFileChange = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0]
+      if (!file) {
+        return
+      }
+      const reader = new FileReader()
+      reader.onload = () => {
+        const text = reader.result
+        if (typeof text !== 'string') {
+          return
+        }
+        const parsed = parseSrt(text)
+        if (parsed.length === 0) {
+          return
+        }
+        pushSegments(() => {
+          setSelectedSegmentId(parsed[0]?.id ?? null)
+          return parsed
+        })
+        const importedLabels = [...new Set(parsed.map((s) => s.label).filter(Boolean))]
+        setLabels((prev) => {
+          const merged = [...prev]
+          for (const label of importedLabels) {
+            if (!merged.includes(label)) {
+              merged.push(label)
+            }
+          }
+          return merged
+        })
+      }
+      reader.readAsText(file)
+      if (srtInputRef.current) {
+        srtInputRef.current.value = ''
+      }
+    },
+    [pushSegments]
+  )
 
   const handlePointerMove = useCallback(
     (event: PointerEvent) => {
@@ -475,6 +522,7 @@ function SrtLabelingPage() {
       commitSnapshot()
     }
     dragRef.current = null
+    suppressAutoScrollRef.current = false
     playheadDragRef.current = null
     window.removeEventListener('pointermove', handlePointerMove)
     window.removeEventListener('pointerup', handlePointerUp)
@@ -491,6 +539,7 @@ function SrtLabelingPage() {
       }
       event.preventDefault()
       event.stopPropagation()
+      suppressAutoScrollRef.current = true
       saveSnapshot()
       dragRef.current = {
         id: segment.id,
@@ -614,13 +663,51 @@ function SrtLabelingPage() {
   }, [currentTime, handlePlayToggle, handleSeek, sortedSegments, selectedSegmentId, undoSegments, redoSegments])
 
   useEffect(() => {
-    if (!selectedSegmentId || !laneRef.current) return
-    const idx = sortedSegments.findIndex((s) => s.id === selectedSegmentId)
-    if (idx < 0) return
-    const prevSegment = idx > 0 ? sortedSegments[idx - 1] : null
-    const scrollTarget = prevSegment ? prevSegment.startSec * pixelsPerSecond : 0
-    laneRef.current.scrollLeft = scrollTarget
-  }, [selectedSegmentId, sortedSegments, pixelsPerSecond])
+    const lane = laneRef.current
+    if (!lane) return
+
+    if (suppressAutoScrollRef.current) return
+    if (dragRef.current) return
+    if (isScalingRef.current) return
+
+    if (!selectedSegmentId) return
+    const seg = segments.find((s) => s.id === selectedSegmentId)
+    if (!seg) return
+
+    const segLeft = seg.startSec * pixelsPerSecond
+    const segRight = seg.endSec * pixelsPerSecond
+    const viewLeft = lane.scrollLeft
+    const viewRight = lane.scrollLeft + lane.clientWidth
+
+    if (segLeft >= viewLeft && segRight <= viewRight) return
+
+    if (segRight - segLeft > lane.clientWidth) {
+      lane.scrollLeft = segLeft
+    } else if (segLeft < viewLeft) {
+      lane.scrollLeft = segLeft
+    } else {
+      lane.scrollLeft = segRight - lane.clientWidth
+    }
+  }, [selectedSegmentId, segments, pixelsPerSecond])
+
+  useEffect(() => {
+    if (!isPlaying) return
+    const lane = laneRef.current
+    if (!lane) return
+    if (dragRef.current) return
+    if (isScalingRef.current) return
+
+    const playheadX = currentTime * pixelsPerSecond
+    const viewLeft = lane.scrollLeft
+    const viewRight = lane.scrollLeft + lane.clientWidth
+    const margin = lane.clientWidth * 0.15
+
+    if (playheadX > viewRight - margin) {
+      lane.scrollLeft = playheadX - lane.clientWidth + margin
+    } else if (playheadX < viewLeft + margin) {
+      lane.scrollLeft = playheadX - margin
+    }
+  }, [currentTime, isPlaying, pixelsPerSecond])
 
   return (
     <main className="workspace">
@@ -696,6 +783,24 @@ function SrtLabelingPage() {
                 Duration {duration === null ? '--:--:--,---' : formatTimecode(duration)}
               </span>
             </div>
+          </div>
+          <div className="prompt-editor">
+            <div className="row-header">
+              <span className="section-title">Prompt</span>
+              <button
+                type="button"
+                className="ghost-button small"
+                onClick={() => setPromptText(buildGeminiPrompt(labels))}
+              >
+                Reset
+              </button>
+            </div>
+            <textarea
+              className="prompt-textarea mono"
+              value={promptText}
+              onChange={(e) => setPromptText(e.target.value)}
+              rows={6}
+            />
           </div>
         </article>
 
@@ -834,14 +939,29 @@ function SrtLabelingPage() {
             </div>
 
             <div className="export-panel">
-              <div className="section-title">Export</div>
-              <button
-                className="primary-button"
-                onClick={handleExport}
-                disabled={!canExport}
-              >
-                Download labels.srt
-              </button>
+              <div className="section-title">Import / Export</div>
+              <div className="label-inline">
+                <input
+                  ref={srtInputRef}
+                  type="file"
+                  className="sr-only"
+                  accept=".srt"
+                  onChange={handleSrtFileChange}
+                />
+                <button
+                  className="ghost-button"
+                  onClick={handleImportSrt}
+                >
+                  Import SRT
+                </button>
+                <button
+                  className="primary-button"
+                  onClick={handleExport}
+                  disabled={!canExport}
+                >
+                  Download labels.srt
+                </button>
+              </div>
             </div>
           </div>
         </article>
@@ -860,6 +980,9 @@ function SrtLabelingPage() {
                 max="500"
                 value={pixelsPerSecond}
                 onChange={(e) => setPixelsPerSecond(Number(e.target.value))}
+                onPointerDown={() => { isScalingRef.current = true }}
+                onPointerUp={() => { isScalingRef.current = false }}
+                onLostPointerCapture={() => { isScalingRef.current = false }}
                 className="timeline-scale-slider"
               />
               <span className="timeline-scale-value mono">{pixelsPerSecond}px/s</span>
