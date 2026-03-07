@@ -14,6 +14,7 @@ import { validateSegments } from '../lib/segment-validate.ts'
 import { buildGeminiPrompt } from '../lib/gemini-schema'
 import { analyzeVideo } from '../lib/gemini-client'
 import { normalizeGeminiSegments } from '../lib/gemini-normalize'
+import { useUndoHistory } from '../lib/use-undo-history'
 
 export const Route = createFileRoute('/')({ component: SrtLabelingPage })
 
@@ -62,7 +63,15 @@ function SrtLabelingPage() {
   const [currentTime, setCurrentTime] = useState(0)
   const [isPlaying, setIsPlaying] = useState(false)
   const [labels, setLabels] = useState<string[]>(DEFAULT_LABELS)
-  const [segments, setSegments] = useState<Segment[]>([])
+  const {
+    state: segments,
+    push: pushSegments,
+    setWithoutHistory: setSegmentsNoHistory,
+    undo: undoSegments,
+    redo: redoSegments,
+    saveSnapshot,
+    commitSnapshot,
+  } = useUndoHistory<Segment[]>([])
   const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(() =>
     segments[0]?.id ?? null
   )
@@ -281,7 +290,7 @@ function SrtLabelingPage() {
     if (suggestedSegments.length === 0) {
       return
     }
-    setSegments(suggestedSegments)
+    setSegmentsNoHistory(suggestedSegments)
     setSelectedSegmentId(suggestedSegments[0]?.id ?? null)
     setSuggestedSegments([])
   }
@@ -325,11 +334,11 @@ function SrtLabelingPage() {
   )
 
   const updateSegment = (id: string, updater: (segment: Segment) => Segment) => {
-    setSegments((prev) => prev.map((segment) => (segment.id === id ? updater(segment) : segment)))
+    pushSegments((prev) => prev.map((segment) => (segment.id === id ? updater(segment) : segment)))
   }
 
   const handleAddSegment = () => {
-    setSegments((prev) => {
+    pushSegments((prev) => {
       const sorted = [...prev].sort((a, b) => {
         if (a.startSec === b.startSec) {
           return a.endSec - b.endSec
@@ -344,7 +353,7 @@ function SrtLabelingPage() {
   }
 
   const handleRemoveSegment = (id: string) => {
-    setSegments((prev) => {
+    pushSegments((prev) => {
       const next = prev.filter((segment) => segment.id !== id)
       setSelectedSegmentId((current) => {
         if (current && current !== id) {
@@ -396,7 +405,7 @@ function SrtLabelingPage() {
       const scrollDelta = lane ? lane.scrollLeft - (dragState as unknown as { startScrollLeft: number }).startScrollLeft : 0
       const deltaPx = event.clientX - dragState.startX + scrollDelta
       const deltaSeconds = deltaPx / pixelsPerSecond
-      setSegments((prev) =>
+      setSegmentsNoHistory((prev) =>
         {
           const minGap = 0.001
           const sorted = [...prev].sort((a, b) => {
@@ -458,15 +467,18 @@ function SrtLabelingPage() {
         }
       )
     },
-    [setSegments]
+    [setSegmentsNoHistory]
   )
 
   const handlePointerUp = useCallback(() => {
+    if (dragRef.current) {
+      commitSnapshot()
+    }
     dragRef.current = null
     playheadDragRef.current = null
     window.removeEventListener('pointermove', handlePointerMove)
     window.removeEventListener('pointerup', handlePointerUp)
-  }, [handlePointerMove])
+  }, [handlePointerMove, commitSnapshot])
 
   const startDrag = useCallback(
     (
@@ -479,6 +491,7 @@ function SrtLabelingPage() {
       }
       event.preventDefault()
       event.stopPropagation()
+      saveSnapshot()
       dragRef.current = {
         id: segment.id,
         type,
@@ -501,7 +514,7 @@ function SrtLabelingPage() {
       window.addEventListener('pointermove', handlePointerMove)
       window.addEventListener('pointerup', handlePointerUp)
     },
-    [duration, timelineWidth, handlePointerMove, handlePointerUp]
+    [duration, timelineWidth, handlePointerMove, handlePointerUp, saveSnapshot]
   )
 
   const handlePlayheadPointerMove = useCallback(
@@ -552,6 +565,16 @@ function SrtLabelingPage() {
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.code === 'KeyZ') {
+        event.preventDefault()
+        redoSegments()
+        return
+      }
+      if ((event.metaKey || event.ctrlKey) && event.code === 'KeyZ') {
+        event.preventDefault()
+        undoSegments()
+        return
+      }
       if (event.code === 'Space') {
         event.preventDefault()
         handlePlayToggle()
@@ -588,7 +611,7 @@ function SrtLabelingPage() {
     return () => {
       window.removeEventListener('keydown', handleKeyDown)
     }
-  }, [currentTime, handlePlayToggle, handleSeek, sortedSegments, selectedSegmentId])
+  }, [currentTime, handlePlayToggle, handleSeek, sortedSegments, selectedSegmentId, undoSegments, redoSegments])
 
   useEffect(() => {
     if (!selectedSegmentId || !laneRef.current) return
