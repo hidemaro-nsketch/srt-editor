@@ -9,8 +9,11 @@ import tailwindcss from '@tailwindcss/vite'
 import { nitro } from 'nitro/vite'
 
 const config = defineConfig({
+  server: {
+    strictPort: false,
+  },
   plugins: [
-    devtools(),
+    devtools({ eventBusConfig: { enabled: false } }),
     nitro({ rollupConfig: { external: [/^@sentry\//] } }),
     tsconfigPaths({ projects: ['./tsconfig.json'] }),
     tailwindcss(),
