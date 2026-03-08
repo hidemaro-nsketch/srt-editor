@@ -11,10 +11,15 @@ import { formatSrt } from '../lib/srt-format.ts'
 import { formatTimecode } from '../lib/timecode.ts'
 import type { Segment, ValidationIssue } from '../lib/types'
 import { validateSegments } from '../lib/segment-validate.ts'
+import { buildGeminiPrompt } from '../lib/gemini-schema'
+import { analyzeVideo } from '../lib/gemini-client'
+import { normalizeGeminiSegments } from '../lib/gemini-normalize'
+import { parseSrt } from '../lib/srt-parse'
+import { useUndoHistory } from '../lib/use-undo-history'
 
 export const Route = createFileRoute('/')({ component: SrtLabelingPage })
 
-const DEFAULT_LABELS = ['START', 'x', 'END']
+const DEFAULT_LABELS = ['START', 'x', 'END', 'munching start', 'munching end']
 
 const createId = () => {
   if (globalThis.crypto && 'randomUUID' in globalThis.crypto) {
@@ -29,6 +34,26 @@ const createSegment = (seedLabel: string, startSec: number, endSec: number): Seg
   endSec,
   label: seedLabel,
 })
+
+const LABEL_COLORS: Record<string, string> = {
+  START: '210, 80%, 55%',
+  END: '0, 75%, 55%',
+  x: '160, 50%, 45%',
+  'munching start': '35, 85%, 55%',
+  'munching end': '280, 60%, 55%',
+}
+
+const labelToHsl = (label: string): string => {
+  if (LABEL_COLORS[label]) {
+    return LABEL_COLORS[label]
+  }
+  let hash = 0
+  for (let i = 0; i < label.length; i++) {
+    hash = label.charCodeAt(i) + ((hash << 5) - hash)
+  }
+  const h = ((hash % 360) + 360) % 360
+  return `${h}, 65%, 50%`
+}
 
 function SrtLabelingPage() {
   const mediaRef = useRef<HTMLVideoElement | null>(null)
@@ -52,17 +77,35 @@ function SrtLabelingPage() {
       }
     | null
   >(null)
+  const srtInputRef = useRef<HTMLInputElement | null>(null)
+  const promptInputRef = useRef<HTMLInputElement | null>(null)
+  const isScalingRef = useRef(false)
+  const suppressAutoScrollRef = useRef(false)
   const [mediaUrl, setMediaUrl] = useState<string | null>(null)
   const [mediaName, setMediaName] = useState<string | null>(null)
+  const [mediaFile, setMediaFile] = useState<File | null>(null)
   const [duration, setDuration] = useState<number | null>(null)
   const [currentTime, setCurrentTime] = useState(0)
   const [isPlaying, setIsPlaying] = useState(false)
   const [labels, setLabels] = useState<string[]>(DEFAULT_LABELS)
-  const [segments, setSegments] = useState<Segment[]>([])
+  const {
+    state: segments,
+    push: pushSegments,
+    setWithoutHistory: setSegmentsNoHistory,
+    undo: undoSegments,
+    redo: redoSegments,
+    saveSnapshot,
+    commitSnapshot,
+  } = useUndoHistory<Segment[]>([])
   const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(() =>
     segments[0]?.id ?? null
   )
   const [pixelsPerSecond, setPixelsPerSecond] = useState(100)
+  const [promptText, setPromptText] = useState(() => buildGeminiPrompt(DEFAULT_LABELS))
+  const [analysisStatus, setAnalysisStatus] = useState<'idle' | 'loading' | 'error'>('idle')
+  const [analysisError, setAnalysisError] = useState<string | null>(null)
+  const [analysisMeta, setAnalysisMeta] = useState<string | null>(null)
+  const [suggestedSegments, setSuggestedSegments] = useState<Segment[]>([])
 
   useEffect(() => {
     const media = mediaRef.current
@@ -139,14 +182,20 @@ function SrtLabelingPage() {
     }
   }, [mediaUrl])
 
-  const activeSegmentId = useMemo(() => {
-    if (!isPlaying && selectedSegmentId) {
-      return selectedSegmentId
+  useEffect(() => {
+    const match = segments.find(
+      (s) => currentTime >= s.startSec && currentTime <= s.endSec
+    )
+    if (match) {
+      setSelectedSegmentId(match.id)
     }
+  }, [currentTime, segments])
+
+  const activeSegmentId = useMemo(() => {
     return segments.find(
       (segment) => currentTime >= segment.startSec && currentTime <= segment.endSec
-    )?.id
-  }, [currentTime, isPlaying, segments, selectedSegmentId])
+    )?.id ?? selectedSegmentId ?? null
+  }, [currentTime, segments, selectedSegmentId])
 
   const issues: ValidationIssue[] = useMemo(
     () => validateSegments(segments, labels, duration ?? undefined),
@@ -164,6 +213,23 @@ function SrtLabelingPage() {
     [segments, activeSegmentId]
   )
   const inspectorSegment = activeSegment ?? selectedSegment
+
+  const sortedSegments = useMemo(
+    () => [...segments].sort((a, b) => a.startSec - b.startSec || a.endSec - b.endSec),
+    [segments]
+  )
+
+  const inspectorIndex = useMemo(() => {
+    if (!inspectorSegment) return null
+    const idx = sortedSegments.findIndex((s) => s.id === inspectorSegment.id)
+    return idx >= 0 ? idx + 1 : null
+  }, [sortedSegments, inspectorSegment])
+
+  const prevSegmentOfInspector = useMemo(() => {
+    if (!inspectorSegment) return null
+    const idx = sortedSegments.findIndex((s) => s.id === inspectorSegment.id)
+    return idx > 0 ? sortedSegments[idx - 1] : null
+  }, [sortedSegments, inspectorSegment])
 
   const timelineTicks = useMemo(() => {
     if (!duration || !Number.isFinite(duration) || duration <= 0) {
@@ -192,6 +258,7 @@ function SrtLabelingPage() {
     const url = URL.createObjectURL(file)
     setMediaUrl(url)
     setMediaName(file.name)
+    setMediaFile(file)
   }
 
   const handleLoadClick = () => {
@@ -211,9 +278,56 @@ function SrtLabelingPage() {
     setDuration(null)
     setMediaUrl(null)
     setMediaName(null)
+    setMediaFile(null)
+    setAnalysisStatus('idle')
+    setAnalysisError(null)
+    setAnalysisMeta(null)
+    setSuggestedSegments([])
     if (fileInputRef.current) {
       fileInputRef.current.value = ''
     }
+  }
+
+  const handleAnalyze = useCallback(async () => {
+    if (!mediaFile) {
+      return
+    }
+    setAnalysisStatus('loading')
+    setAnalysisError(null)
+    setAnalysisMeta(null)
+    try {
+      const result = await analyzeVideo(mediaFile, promptText)
+      const normalized = normalizeGeminiSegments(result.segments, duration, {
+        labels,
+        defaultLabel: 'x',
+      })
+      setSuggestedSegments(normalized)
+      if (result.meta?.totalDurationSec) {
+        const metaLine = `Gemini analyzed up to ${result.meta.lastEndSec ?? 0}s of ${result.meta.totalDurationSec}s.`
+        setAnalysisMeta(result.meta.coverageNotes ? `${metaLine} ${result.meta.coverageNotes}` : metaLine)
+      }
+      setAnalysisStatus('idle')
+    } catch (error) {
+      const message =
+        typeof error === 'object' && error && 'message' in error
+          ? String((error as { message?: string }).message)
+          : 'Gemini analysis failed.'
+      setAnalysisError(message)
+      setAnalysisStatus('error')
+    }
+  }, [mediaFile, promptText, duration])
+
+  const handleApplySuggestions = () => {
+    if (suggestedSegments.length === 0) {
+      return
+    }
+    setSegmentsNoHistory(suggestedSegments)
+    setSelectedSegmentId(suggestedSegments[0]?.id ?? null)
+    setSuggestedSegments([])
+  }
+
+  const handleDismissSuggestions = () => {
+    setSuggestedSegments([])
   }
 
   const handlePlayToggle = useCallback(() => {
@@ -251,26 +365,27 @@ function SrtLabelingPage() {
   )
 
   const updateSegment = (id: string, updater: (segment: Segment) => Segment) => {
-    setSegments((prev) => prev.map((segment) => (segment.id === id ? updater(segment) : segment)))
+    pushSegments((prev) => prev.map((segment) => (segment.id === id ? updater(segment) : segment)))
   }
 
   const handleAddSegment = () => {
-    setSegments((prev) => {
-      const sorted = [...prev].sort((a, b) => {
-        if (a.startSec === b.startSec) {
-          return a.endSec - b.endSec
-        }
-        return a.startSec - b.startSec
-      })
-      const lastEnd = sorted.length > 0 ? sorted[sorted.length - 1].endSec : currentTime
-      const next = createSegment(labels[0] ?? '', lastEnd, lastEnd + 0.5)
-      setSelectedSegmentId(next.id)
-      return [...prev, next]
-    })
+    const newStart = currentTime
+    const newEnd = currentTime + 0.1
+    const overlapping = segments.some(
+      (s) => s.startSec < newEnd && s.endSec > newStart
+    )
+    if (overlapping) {
+      window.alert('Cannot add segment: overlaps with an existing segment at the current playhead position.')
+      return
+    }
+    const next = createSegment(labels[0] ?? '', newStart, newEnd)
+    pushSegments((prev) => [...prev, next])
+    setSelectedSegmentId(next.id)
   }
 
   const handleRemoveSegment = (id: string) => {
-    setSegments((prev) => {
+    suppressAutoScrollRef.current = true
+    pushSegments((prev) => {
       const next = prev.filter((segment) => segment.id !== id)
       setSelectedSegmentId((current) => {
         if (current && current !== id) {
@@ -280,6 +395,9 @@ function SrtLabelingPage() {
       })
       return next
     })
+    setTimeout(() => {
+      suppressAutoScrollRef.current = false
+    }, 100)
   }
 
   const handleAddLabel = useCallback(() => {
@@ -312,6 +430,82 @@ function SrtLabelingPage() {
     URL.revokeObjectURL(url)
   }
 
+  const handleImportSrt = useCallback(() => {
+    srtInputRef.current?.click()
+  }, [])
+
+  const handleSrtFileChange = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0]
+      if (!file) {
+        return
+      }
+      const reader = new FileReader()
+      reader.onload = () => {
+        const text = reader.result
+        if (typeof text !== 'string') {
+          return
+        }
+        const parsed = parseSrt(text)
+        if (parsed.length === 0) {
+          return
+        }
+        pushSegments(() => {
+          setSelectedSegmentId(parsed[0]?.id ?? null)
+          return parsed
+        })
+        const importedLabels = [...new Set(parsed.map((s) => s.label).filter(Boolean))]
+        setLabels((prev) => {
+          const merged = [...prev]
+          for (const label of importedLabels) {
+            if (!merged.includes(label)) {
+              merged.push(label)
+            }
+          }
+          return merged
+        })
+      }
+      reader.readAsText(file)
+      if (srtInputRef.current) {
+        srtInputRef.current.value = ''
+      }
+    },
+    [pushSegments]
+  )
+
+  const handleSavePrompt = useCallback(() => {
+    const blob = new Blob([promptText], { type: 'text/plain;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = 'prompt.txt'
+    anchor.click()
+    URL.revokeObjectURL(url)
+  }, [promptText])
+
+  const handleLoadPrompt = useCallback(() => {
+    promptInputRef.current?.click()
+  }, [])
+
+  const handlePromptFileChange = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0]
+      if (!file) return
+      const reader = new FileReader()
+      reader.onload = () => {
+        const text = reader.result
+        if (typeof text === 'string') {
+          setPromptText(text)
+        }
+      }
+      reader.readAsText(file)
+      if (promptInputRef.current) {
+        promptInputRef.current.value = ''
+      }
+    },
+    []
+  )
+
   const handlePointerMove = useCallback(
     (event: PointerEvent) => {
       const dragState = dragRef.current
@@ -322,7 +516,7 @@ function SrtLabelingPage() {
       const scrollDelta = lane ? lane.scrollLeft - (dragState as unknown as { startScrollLeft: number }).startScrollLeft : 0
       const deltaPx = event.clientX - dragState.startX + scrollDelta
       const deltaSeconds = deltaPx / pixelsPerSecond
-      setSegments((prev) =>
+      setSegmentsNoHistory((prev) =>
         {
           const minGap = 0.001
           const sorted = [...prev].sort((a, b) => {
@@ -365,48 +559,38 @@ function SrtLabelingPage() {
           }
 
           if (dragState.type === 'start') {
-            const minStart = prevSegment ? prevSegment.startSec + minGap : 0
+            const minStart = prevSegment ? prevSegment.endSec : 0
             const nextStart = Math.min(
               Math.max(minStart, dragState.startStart + deltaSeconds),
               dragState.startEnd - minGap
             )
             current.startSec = nextStart
-            if (prevSegment) {
-              const prevTarget = nextSegments.find(
-                (segment) => segment.id === prevSegment.id
-              )
-              if (prevTarget) {
-                prevTarget.endSec = nextStart
-              }
-            }
             return nextSegments
           }
 
-          const maxEnd = nextSegment ? nextSegment.endSec - minGap : dragState.duration
+          const maxEnd = nextSegment ? nextSegment.startSec : dragState.duration
           const nextEnd = Math.max(
             Math.min(maxEnd, dragState.startEnd + deltaSeconds),
             dragState.startStart + minGap
           )
           current.endSec = nextEnd
-          if (nextSegment) {
-            const nextTarget = nextSegments.find((segment) => segment.id === nextSegment.id)
-            if (nextTarget) {
-              nextTarget.startSec = nextEnd
-            }
-          }
           return nextSegments
         }
       )
     },
-    [setSegments]
+    [setSegmentsNoHistory]
   )
 
   const handlePointerUp = useCallback(() => {
+    if (dragRef.current) {
+      commitSnapshot()
+    }
     dragRef.current = null
+    suppressAutoScrollRef.current = false
     playheadDragRef.current = null
     window.removeEventListener('pointermove', handlePointerMove)
     window.removeEventListener('pointerup', handlePointerUp)
-  }, [handlePointerMove])
+  }, [handlePointerMove, commitSnapshot])
 
   const startDrag = useCallback(
     (
@@ -419,6 +603,8 @@ function SrtLabelingPage() {
       }
       event.preventDefault()
       event.stopPropagation()
+      suppressAutoScrollRef.current = true
+      saveSnapshot()
       dragRef.current = {
         id: segment.id,
         type,
@@ -441,7 +627,7 @@ function SrtLabelingPage() {
       window.addEventListener('pointermove', handlePointerMove)
       window.addEventListener('pointerup', handlePointerUp)
     },
-    [duration, timelineWidth, handlePointerMove, handlePointerUp]
+    [duration, timelineWidth, handlePointerMove, handlePointerUp, saveSnapshot]
   )
 
   const handlePlayheadPointerMove = useCallback(
@@ -492,9 +678,35 @@ function SrtLabelingPage() {
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.code === 'KeyZ') {
+        event.preventDefault()
+        redoSegments()
+        return
+      }
+      if ((event.metaKey || event.ctrlKey) && event.code === 'KeyZ') {
+        event.preventDefault()
+        undoSegments()
+        return
+      }
       if (event.code === 'Space') {
         event.preventDefault()
         handlePlayToggle()
+        return
+      }
+      if (event.metaKey && event.code === 'ArrowRight') {
+        event.preventDefault()
+        const idx = sortedSegments.findIndex((s) => s.id === selectedSegmentId)
+        if (idx >= 0 && idx < sortedSegments.length - 1) {
+          setSelectedSegmentId(sortedSegments[idx + 1].id)
+        }
+        return
+      }
+      if (event.metaKey && event.code === 'ArrowLeft') {
+        event.preventDefault()
+        const idx = sortedSegments.findIndex((s) => s.id === selectedSegmentId)
+        if (idx > 0) {
+          setSelectedSegmentId(sortedSegments[idx - 1].id)
+        }
         return
       }
       if (event.code === 'ArrowLeft') {
@@ -512,7 +724,54 @@ function SrtLabelingPage() {
     return () => {
       window.removeEventListener('keydown', handleKeyDown)
     }
-  }, [currentTime, handlePlayToggle, handleSeek])
+  }, [currentTime, handlePlayToggle, handleSeek, sortedSegments, selectedSegmentId, undoSegments, redoSegments])
+
+  useEffect(() => {
+    const lane = laneRef.current
+    if (!lane) return
+
+    if (suppressAutoScrollRef.current) return
+    if (dragRef.current) return
+    if (isScalingRef.current) return
+
+    if (!selectedSegmentId) return
+    const seg = segments.find((s) => s.id === selectedSegmentId)
+    if (!seg) return
+
+    const segLeft = seg.startSec * pixelsPerSecond
+    const segRight = seg.endSec * pixelsPerSecond
+    const viewLeft = lane.scrollLeft
+    const viewRight = lane.scrollLeft + lane.clientWidth
+
+    if (segLeft >= viewLeft && segRight <= viewRight) return
+
+    if (segRight - segLeft > lane.clientWidth) {
+      lane.scrollLeft = segLeft
+    } else if (segLeft < viewLeft) {
+      lane.scrollLeft = segLeft
+    } else {
+      lane.scrollLeft = segRight - lane.clientWidth
+    }
+  }, [selectedSegmentId, segments, pixelsPerSecond])
+
+  useEffect(() => {
+    if (!isPlaying) return
+    const lane = laneRef.current
+    if (!lane) return
+    if (dragRef.current) return
+    if (isScalingRef.current) return
+
+    const playheadX = currentTime * pixelsPerSecond
+    const viewLeft = lane.scrollLeft
+    const viewRight = lane.scrollLeft + lane.clientWidth
+    const margin = lane.clientWidth * 0.15
+
+    if (playheadX > viewRight - margin) {
+      lane.scrollLeft = playheadX - lane.clientWidth + margin
+    } else if (playheadX < viewLeft + margin) {
+      lane.scrollLeft = playheadX - margin
+    }
+  }, [currentTime, isPlaying, pixelsPerSecond])
 
   return (
     <main className="workspace">
@@ -527,7 +786,7 @@ function SrtLabelingPage() {
                 ref={fileInputRef}
                 type="file"
                 className="sr-only"
-                accept="video/*,audio/*"
+                accept="video/*"
                 onChange={handleFileChange}
               />
               {mediaUrl ? (
@@ -562,6 +821,13 @@ function SrtLabelingPage() {
               </button>
               <button
                 className="ghost-button"
+                onClick={handleAnalyze}
+                disabled={!mediaFile || analysisStatus === 'loading'}
+              >
+                {analysisStatus === 'loading' ? 'Analyzing...' : 'Auto analyze'}
+              </button>
+              <button
+                className="ghost-button"
                 onClick={() => handleSeek(currentTime - 2)}
                 disabled={!mediaUrl}
               >
@@ -582,6 +848,47 @@ function SrtLabelingPage() {
               </span>
             </div>
           </div>
+          <div className="prompt-editor">
+            <input
+              ref={promptInputRef}
+              type="file"
+              className="sr-only"
+              accept=".txt,.md"
+              onChange={handlePromptFileChange}
+            />
+            <div className="row-header">
+              <span className="section-title">Prompt</span>
+              <div className="label-inline">
+                <button
+                  type="button"
+                  className="ghost-button small"
+                  onClick={handleLoadPrompt}
+                >
+                  Load
+                </button>
+                <button
+                  type="button"
+                  className="ghost-button small"
+                  onClick={handleSavePrompt}
+                >
+                  Save
+                </button>
+                <button
+                  type="button"
+                  className="ghost-button small"
+                  onClick={() => setPromptText(buildGeminiPrompt(labels))}
+                >
+                  Reset
+                </button>
+              </div>
+            </div>
+            <textarea
+              className="prompt-textarea mono"
+              value={promptText}
+              onChange={(e) => setPromptText(e.target.value)}
+              rows={6}
+            />
+          </div>
         </article>
 
         <article className="panel">
@@ -593,7 +900,12 @@ function SrtLabelingPage() {
 
           <div className="editor-panel">
             <div>
-              <div className="section-title">Active segment</div>
+              <div className="row-header">
+                <div className="section-title">Active segment</div>
+                {inspectorIndex !== null && (
+                  <span className="section-title mono">{inspectorIndex} / {segments.length}</span>
+                )}
+              </div>
               {inspectorSegment ? (
                 <div className="layout-stack">
                   <div>
@@ -610,6 +922,19 @@ function SrtLabelingPage() {
                         }
                       >
                         Set to playhead
+                      </button>
+                      <button
+                        type="button"
+                        className="ghost-button small"
+                        disabled={!prevSegmentOfInspector}
+                        onClick={() =>
+                          updateSegment(inspectorSegment.id, (prev) => ({
+                            ...prev,
+                            startSec: prevSegmentOfInspector!.endSec,
+                          }))
+                        }
+                      >
+                        Snap to prev end
                       </button>
                     </div>
                     <div className="readout mono">
@@ -676,6 +1001,29 @@ function SrtLabelingPage() {
             </div>
 
             <div>
+              <div className="section-title">Auto suggestions</div>
+              {analysisStatus === 'error' && analysisError ? (
+                <div className="srt-preview mono">{analysisError}</div>
+              ) : null}
+              {analysisMeta ? <div className="srt-preview mono">{analysisMeta}</div> : null}
+              {suggestedSegments.length > 0 ? (
+                <div className="layout-stack">
+                  <div className="srt-preview mono">{formatSrt(suggestedSegments)}</div>
+                  <div className="label-inline">
+                    <button className="primary-button" onClick={handleApplySuggestions}>
+                      Apply suggestions
+                    </button>
+                    <button className="ghost-button" onClick={handleDismissSuggestions}>
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="media-placeholder">No suggestions yet.</div>
+              )}
+            </div>
+
+            <div>
               <div className="section-title">SRT Preview</div>
               <pre className="srt-preview mono">
                 {canExport ? formatSrt(segments) : issues.length > 0 ? issues.map(i => i.message).join('\n') : 'No segments'}
@@ -683,14 +1031,29 @@ function SrtLabelingPage() {
             </div>
 
             <div className="export-panel">
-              <div className="section-title">Export</div>
-              <button
-                className="primary-button"
-                onClick={handleExport}
-                disabled={!canExport}
-              >
-                Download labels.srt
-              </button>
+              <div className="section-title">Import / Export</div>
+              <div className="label-inline">
+                <input
+                  ref={srtInputRef}
+                  type="file"
+                  className="sr-only"
+                  accept=".srt"
+                  onChange={handleSrtFileChange}
+                />
+                <button
+                  className="ghost-button"
+                  onClick={handleImportSrt}
+                >
+                  Import SRT
+                </button>
+                <button
+                  className="primary-button"
+                  onClick={handleExport}
+                  disabled={!canExport}
+                >
+                  Download labels.srt
+                </button>
+              </div>
             </div>
           </div>
         </article>
@@ -709,6 +1072,9 @@ function SrtLabelingPage() {
                 max="500"
                 value={pixelsPerSecond}
                 onChange={(e) => setPixelsPerSecond(Number(e.target.value))}
+                onPointerDown={() => { isScalingRef.current = true }}
+                onPointerUp={() => { isScalingRef.current = false }}
+                onLostPointerCapture={() => { isScalingRef.current = false }}
                 className="timeline-scale-slider"
               />
               <span className="timeline-scale-value mono">{pixelsPerSecond}px/s</span>
@@ -718,7 +1084,12 @@ function SrtLabelingPage() {
             </button>
           </div>
         </div>
-        <div ref={laneRef} className="timeline-lane">
+        <div ref={laneRef} className="timeline-lane" onClick={(event) => {
+          if (event.target === event.currentTarget || (event.target as HTMLElement).closest('.timeline-ruler')) {
+            const nextTime = getTimeFromClientX(event.clientX)
+            handleSeek(nextTime)
+          }
+        }}>
           <div className="timeline-ruler" style={{ width: timelineWidth > 0 ? timelineWidth : '100%' }}>
             {timelineTicks.map((tick) => (
               <div
@@ -756,6 +1127,8 @@ function SrtLabelingPage() {
                 style={{
                   width: `${Math.max(width, 4)}px`,
                   left: `${Math.max(left, 0)}px`,
+                  borderColor: `hsl(${labelToHsl(segment.label)})`,
+                  backgroundColor: `hsla(${labelToHsl(segment.label)}, 0.5)`,
                 }}
                 onPointerDown={(event) => startDrag(event, segment, 'move')}
                 onClick={() => setSelectedSegmentId(segment.id)}
