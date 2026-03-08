@@ -783,6 +783,7 @@ function SrtLabelingPage() {
   return (
     <main className="workspace">
       <section className="workspace-top">
+        <div className="workspace-left">
         <article className="panel">
           <div className="panel-header">
             <div>
@@ -817,43 +818,11 @@ function SrtLabelingPage() {
               <div className="media-placeholder">Drop a video/audio file here.</div>
             )}
           </div>
-          <div className="toolbar">
-            <div className="toolbar-group">
-              <button
-                className="primary-button"
-                onClick={handlePlayToggle}
-                disabled={!mediaUrl}
-              >
-                {isPlaying ? 'Pause' : 'Play'}
-              </button>
-              <button
-                className="ghost-button"
-                onClick={handleAnalyze}
-                disabled={!mediaFile || analysisStatus === 'loading'}
-              >
-                {analysisStatus === 'loading' ? 'Analyzing...' : 'Auto analyze'}
-              </button>
-              <button
-                className="ghost-button"
-                onClick={() => handleSeek(currentTime - 2)}
-                disabled={!mediaUrl}
-              >
-                -2s
-              </button>
-              <button
-                className="ghost-button"
-                onClick={() => handleSeek(currentTime + 2)}
-                disabled={!mediaUrl}
-              >
-                +2s
-              </button>
-            </div>
-            <div className="toolbar-meta mono">
-              <span>Playhead {formatTimecode(currentTime)}</span>
-              <span>
-                Duration {duration === null ? '--:--:--,---' : formatTimecode(duration)}
-              </span>
-            </div>
+        </article>
+
+        <section className="panel prompt-section">
+          <div className="panel-header">
+            <p className="panel-title">Auto Label</p>
           </div>
           <div className="prompt-editor">
             <input
@@ -895,8 +864,37 @@ function SrtLabelingPage() {
               onChange={(e) => setPromptText(e.target.value)}
               rows={6}
             />
+            <div>
+              <button
+                className="ghost-button"
+                onClick={handleAnalyze}
+                disabled={!mediaFile || analysisStatus === 'loading'}
+              >
+                {analysisStatus === 'loading' ? 'Analyzing...' : 'Auto analyze'}
+              </button>
+            </div>
+            <div>
+              {analysisStatus === 'error' && analysisError ? (
+                <div className="srt-preview mono">{analysisError}</div>
+              ) : null}
+              {analysisMeta ? <div className="srt-preview mono">{analysisMeta}</div> : null}
+              {suggestedSegments.length > 0 ? (
+                <div className="layout-stack">
+                  <div className="srt-preview mono">{formatSrt(suggestedSegments)}</div>
+                  <div className="label-inline">
+                    <button className="primary-button" onClick={handleApplySuggestions}>
+                      Apply suggestions
+                    </button>
+                    <button className="ghost-button" onClick={handleDismissSuggestions}>
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
           </div>
-        </article>
+        </section>
+        </div>
 
         <article className="panel">
           <div className="panel-header">
@@ -909,40 +907,55 @@ function SrtLabelingPage() {
             <div>
               <div className="row-header">
                 <div className="section-title">Active segment</div>
-                {inspectorIndex !== null && (
-                  <span className="section-title mono">{inspectorIndex} / {segments.length}</span>
+                {inspectorSegment && (
+                  <button
+                    className="ghost-button small"
+                    onClick={() => handleRemoveSegment(inspectorSegment.id)}
+                  >
+                    Delete segment
+                  </button>
                 )}
               </div>
               {inspectorSegment ? (
                 <div className="layout-stack">
                   <div>
                     <div className="row-header">
+                      <label className="section-title">Index</label>
+                    </div>
+                    <div className="readout mono">
+                      {inspectorIndex !== null ? inspectorIndex : '—'}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="row-header">
                       <label className="section-title">Start</label>
-                      <button
-                        type="button"
-                        className="ghost-button small"
-                        onClick={() =>
-                          updateSegment(inspectorSegment.id, (prev) => ({
-                            ...prev,
-                            startSec: currentTime,
-                          }))
-                        }
-                      >
-                        Set to playhead
-                      </button>
-                      <button
-                        type="button"
-                        className="ghost-button small"
-                        disabled={!prevSegmentOfInspector}
-                        onClick={() =>
-                          updateSegment(inspectorSegment.id, (prev) => ({
-                            ...prev,
-                            startSec: prevSegmentOfInspector!.endSec,
-                          }))
-                        }
-                      >
-                        Snap to prev end
-                      </button>
+                      <div className="label-inline">
+                        <button
+                          type="button"
+                          className="ghost-button small"
+                          onClick={() =>
+                            updateSegment(inspectorSegment.id, (prev) => ({
+                              ...prev,
+                              startSec: currentTime,
+                            }))
+                          }
+                        >
+                          Set to playhead
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost-button small"
+                          disabled={!prevSegmentOfInspector}
+                          onClick={() =>
+                            updateSegment(inspectorSegment.id, (prev) => ({
+                              ...prev,
+                              startSec: prevSegmentOfInspector!.endSec,
+                            }))
+                          }
+                        >
+                          Snap to prev end
+                        </button>
+                      </div>
                     </div>
                     <div className="readout mono">
                       {formatTimecode(inspectorSegment.startSec)}
@@ -971,7 +984,7 @@ function SrtLabelingPage() {
                   <div>
                     <div className="row-header">
                       <label className="section-title">Label</label>
-                      <button type="button" className="ghost-button" onClick={handleAddLabel}>
+                      <button type="button" className="ghost-button small" onClick={handleAddLabel}>
                         Add new label
                       </button>
                     </div>
@@ -993,14 +1006,6 @@ function SrtLabelingPage() {
                       ))}
                     </select>
                   </div>
-                  <div className="label-inline">
-                    <button
-                      className="ghost-button"
-                      onClick={() => handleRemoveSegment(inspectorSegment.id)}
-                    >
-                      Delete segment
-                    </button>
-                  </div>
                 </div>
               ) : (
                 <div className="media-placeholder">Select a segment to edit.</div>
@@ -1008,59 +1013,34 @@ function SrtLabelingPage() {
             </div>
 
             <div>
-              <div className="section-title">Auto suggestions</div>
-              {analysisStatus === 'error' && analysisError ? (
-                <div className="srt-preview mono">{analysisError}</div>
-              ) : null}
-              {analysisMeta ? <div className="srt-preview mono">{analysisMeta}</div> : null}
-              {suggestedSegments.length > 0 ? (
-                <div className="layout-stack">
-                  <div className="srt-preview mono">{formatSrt(suggestedSegments)}</div>
-                  <div className="label-inline">
-                    <button className="primary-button" onClick={handleApplySuggestions}>
-                      Apply suggestions
-                    </button>
-                    <button className="ghost-button" onClick={handleDismissSuggestions}>
-                      Dismiss
-                    </button>
-                  </div>
+              <div className="row-header">
+                <div className="section-title">SRT Preview</div>
+                <div className="label-inline">
+                  <input
+                    ref={srtInputRef}
+                    type="file"
+                    className="sr-only"
+                    accept=".srt"
+                    onChange={handleSrtFileChange}
+                  />
+                  <button
+                    className="ghost-button small"
+                    onClick={handleImportSrt}
+                  >
+                    Import SRT
+                  </button>
+                  <button
+                    className="ghost-button small"
+                    onClick={handleExport}
+                    disabled={!canExport}
+                  >
+                    Export SRT
+                  </button>
                 </div>
-              ) : (
-                <div className="media-placeholder">No suggestions yet.</div>
-              )}
-            </div>
-
-            <div>
-              <div className="section-title">SRT Preview</div>
+              </div>
               <pre className="srt-preview mono">
                 {canExport ? formatSrt(segments) : issues.length > 0 ? issues.map(i => i.message).join('\n') : 'No segments'}
               </pre>
-            </div>
-
-            <div className="export-panel">
-              <div className="section-title">Import / Export</div>
-              <div className="label-inline">
-                <input
-                  ref={srtInputRef}
-                  type="file"
-                  className="sr-only"
-                  accept=".srt"
-                  onChange={handleSrtFileChange}
-                />
-                <button
-                  className="ghost-button"
-                  onClick={handleImportSrt}
-                >
-                  Import SRT
-                </button>
-                <button
-                  className="primary-button"
-                  onClick={handleExport}
-                  disabled={!canExport}
-                >
-                  Download labels.srt
-                </button>
-              </div>
             </div>
           </div>
         </article>
@@ -1068,31 +1048,59 @@ function SrtLabelingPage() {
 
       <section className="timeline">
         <div className="timeline-header">
-          <span>Timeline</span>
+          <div className="label-inline">
+            <span>Timeline</span>
+            <span className="mono">Playhead {formatTimecode(currentTime)}</span>
+            <span className="mono">
+              Duration {duration === null ? '--:--:--,---' : formatTimecode(duration)}
+            </span>
+            <span className="mono">Segments {segments.length}</span>
+          </div>
+          <div className="label-inline">
+            <button
+              className="ghost-button"
+              onClick={() => handleSeek(currentTime - 1)}
+              disabled={!mediaUrl}
+            >
+              -1s
+            </button>
+            <button
+              className="ghost-button"
+              onClick={() => handleSeek(currentTime - 0.1)}
+              disabled={!mediaUrl}
+            >
+              -0.1s
+            </button>
+            <button
+              className="ghost-button"
+              onClick={handlePlayToggle}
+              disabled={!mediaUrl}
+            >
+              {isPlaying ? 'Pause' : 'Play'}
+            </button>
+            <button
+              className="ghost-button"
+              onClick={() => handleSeek(currentTime + 0.1)}
+              disabled={!mediaUrl}
+            >
+              +0.1s
+            </button>
+            <button
+              className="ghost-button"
+              onClick={() => handleSeek(currentTime + 1)}
+              disabled={!mediaUrl}
+            >
+              +1s
+            </button>
+          </div>
           <div className="row-header">
-            <span>{segments.length} segments</span>
-            <div className="timeline-scale-control">
-              <span className="timeline-scale-label">Scale</span>
-              <input
-                type="range"
-                min="10"
-                max="500"
-                value={pixelsPerSecond}
-                onChange={(e) => setPixelsPerSecond(Number(e.target.value))}
-                onPointerDown={() => { isScalingRef.current = true }}
-                onPointerUp={() => { isScalingRef.current = false }}
-                onLostPointerCapture={() => { isScalingRef.current = false }}
-                className="timeline-scale-slider"
-              />
-              <span className="timeline-scale-value mono">{pixelsPerSecond}px/s</span>
-            </div>
             <button className="ghost-button" onClick={handleAddSegment}>
-              Add segment
+              Add new segment at current playhead
             </button>
           </div>
         </div>
         <div ref={laneRef} className="timeline-lane" onClick={(event) => {
-          if (event.target === event.currentTarget || (event.target as HTMLElement).closest('.timeline-ruler')) {
+          if ((event.target === event.currentTarget || (event.target as HTMLElement).closest('.timeline-ruler')) && !(event.target as HTMLElement).closest('.timeline-clip')) {
             const nextTime = getTimeFromClientX(event.clientX)
             handleSeek(nextTime)
           }
@@ -1124,6 +1132,7 @@ function SrtLabelingPage() {
             const isSelected = segment.id === selectedSegmentId
             const width = (segment.endSec - segment.startSec) * pixelsPerSecond
             const left = segment.startSec * pixelsPerSecond
+            const sortedIndex = sortedSegments.findIndex((s) => s.id === segment.id) + 1
             return (
               <button
                 key={segment.id}
@@ -1135,23 +1144,44 @@ function SrtLabelingPage() {
                   width: `${Math.max(width, 4)}px`,
                   left: `${Math.max(left, 0)}px`,
                   borderColor: `hsl(${labelToHsl(segment.label)})`,
-                  backgroundColor: `hsla(${labelToHsl(segment.label)}, 0.5)`,
+                  backgroundColor: `hsla(${labelToHsl(segment.label)}, ${isActive ? 0.85 : 0.5})`,
+                  borderWidth: isActive ? '4px 6px' : undefined,
                 }}
                 onPointerDown={(event) => startDrag(event, segment, 'move')}
                 onClick={() => setSelectedSegmentId(segment.id)}
               >
+                <span className="timeline-clip-index">{sortedIndex}</span>
                 <span className="timeline-clip-label">{segment.label || 'No label'}</span>
                 <span
                   className="timeline-handle timeline-handle-start"
+                  style={{ '--handle-color': `hsla(${labelToHsl(segment.label)}, 0.7)` } as React.CSSProperties}
                   onPointerDown={(event) => startDrag(event, segment, 'start')}
                 />
                 <span
                   className="timeline-handle timeline-handle-end"
+                  style={{ '--handle-color': `hsla(${labelToHsl(segment.label)}, 0.7)` } as React.CSSProperties}
                   onPointerDown={(event) => startDrag(event, segment, 'end')}
                 />
               </button>
             )
           })}
+        </div>
+        <div className="timeline-footer">
+          <div className="timeline-scale-control">
+            <span className="timeline-scale-label">Scale</span>
+            <input
+              type="range"
+              min="10"
+              max="500"
+              value={pixelsPerSecond}
+              onChange={(e) => setPixelsPerSecond(Number(e.target.value))}
+              onPointerDown={() => { isScalingRef.current = true }}
+              onPointerUp={() => { isScalingRef.current = false }}
+              onLostPointerCapture={() => { isScalingRef.current = false }}
+              className="timeline-scale-slider"
+            />
+            <span className="timeline-scale-value mono">{pixelsPerSecond}px/s</span>
+          </div>
         </div>
       </section>
     </main>

@@ -147,6 +147,7 @@ select {
 
 .media-player {
   width: 100%;
+  max-height: 60vh;
   background: #000000;
 }
 
@@ -181,9 +182,27 @@ select {
   color: var(--ink-soft);
 }
 
+.workspace-left {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-height: 0;
+  overflow: auto;
+}
+
+.workspace-left > .panel {
+  flex: 2;
+  min-height: 0;
+}
+
+.workspace-left > .prompt-section {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
 .prompt-editor {
-  padding: 0.5rem 0.75rem;
-  border-top: 1px solid var(--line);
+  padding: 0.5rem 0;
 }
 
 .prompt-textarea {
@@ -192,6 +211,7 @@ select {
   padding: 0.5rem;
   font-size: 0.75rem;
   line-height: 1.4;
+  min-height: 156px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--panel-soft);
@@ -287,6 +307,7 @@ select {
 
 .label-inline {
   display: flex;
+  align-items: center;
   gap: 0.5rem;
 }
 
@@ -312,9 +333,9 @@ select {
 .timeline {
   border: 1px solid var(--line);
   background: var(--timeline);
-  padding: 1rem;
+  padding: 1rem 1rem 0.25rem;
   display: grid;
-  grid-template-rows: auto 1fr;
+  grid-template-rows: auto 1fr auto;
   gap: 0.5rem;
   height: 23vh;
   overflow: auto;
@@ -328,6 +349,11 @@ select {
   font-size: 0.65rem;
   text-transform: uppercase;
   color: var(--ink-soft);
+}
+
+.timeline-footer {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .timeline-lane {
@@ -353,12 +379,14 @@ select {
 .timeline-scale-slider {
   width: 120px;
   cursor: pointer;
+  accent-color: var(--ink-soft);
 }
 
 .timeline-scale-value {
   font-size: 0.7rem;
   color: var(--ink-soft);
   min-width: 60px;
+  text-align: right;
 }
 
 .timeline-lane::after {
@@ -443,20 +471,29 @@ select {
   box-shadow: 0 0 0 2px rgba(88, 230, 176, 0.3);
 }
 
-.timeline-clip-label {
+.timeline-clip-index {
   position: absolute;
   bottom: 100%;
-  left: 0;
+  left: 50%;
+  transform: translateX(-50%);
   margin-bottom: 4px;
   font-family: var(--font-mono);
-  font-size: 0.82rem;
+  font-size: 0.75rem;
+  color: #04111f;
+  white-space: nowrap;
+  text-align: center;
+}
+
+.timeline-clip-label {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
   text-transform: uppercase;
   color: #04111f;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 100%;
-  text-align: left;
+  text-align: center;
 }
 
 .timeline-clip-time {
@@ -473,6 +510,11 @@ select {
   background: transparent;
   cursor: ew-resize;
   z-index: 2;
+  transition: background 0.15s;
+}
+
+.timeline-handle:hover {
+  background: var(--handle-color);
 }
 
 .timeline-handle-start {
@@ -558,7 +600,8 @@ select {
   color: var(--ink);
   font-size: 0.75rem;
   line-height: 1.5;
-  max-height: 150px;
+  max-height: 500px;
+  min-height: 300px;
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-all;
