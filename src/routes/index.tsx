@@ -19,7 +19,7 @@ import { useUndoHistory } from '../lib/use-undo-history'
 
 export const Route = createFileRoute('/')({ component: SrtLabelingPage })
 
-const DEFAULT_LABELS = ['START', 'x', 'END', 'munching start', 'munching end']
+const DEFAULT_LABELS = ['START', 'x', 'END']
 
 const createId = () => {
   if (globalThis.crypto && 'randomUUID' in globalThis.crypto) {
@@ -101,7 +101,7 @@ function SrtLabelingPage() {
     segments[0]?.id ?? null
   )
   const [pixelsPerSecond, setPixelsPerSecond] = useState(100)
-  const [promptText, setPromptText] = useState(() => buildGeminiPrompt(DEFAULT_LABELS))
+  const [promptText, setPromptText] = useState(() => buildGeminiPrompt())
   const [analysisStatus, setAnalysisStatus] = useState<'idle' | 'loading' | 'error'>('idle')
   const [analysisError, setAnalysisError] = useState<string | null>(null)
   const [analysisMeta, setAnalysisMeta] = useState<string | null>(null)
@@ -876,7 +876,7 @@ function SrtLabelingPage() {
                 <button
                   type="button"
                   className="ghost-button small"
-                  onClick={() => setPromptText(buildGeminiPrompt(labels))}
+                  onClick={() => setPromptText(buildGeminiPrompt())}
                 >
                   Reset
                 </button>
