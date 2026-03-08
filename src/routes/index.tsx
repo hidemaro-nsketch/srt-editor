@@ -297,8 +297,15 @@ function SrtLabelingPage() {
     setAnalysisMeta(null)
     try {
       const result = await analyzeVideo(mediaFile, promptText)
+      const newLabels = [...new Set(result.segments.map((s) => s.label).filter(Boolean))]
+      let updatedLabels = labels
+      const missing = newLabels.filter((l) => !labels.includes(l))
+      if (missing.length > 0) {
+        updatedLabels = [...labels, ...missing]
+        setLabels(updatedLabels)
+      }
       const normalized = normalizeGeminiSegments(result.segments, duration, {
-        labels,
+        labels: updatedLabels,
         defaultLabel: 'x',
       })
       setSuggestedSegments(normalized)
