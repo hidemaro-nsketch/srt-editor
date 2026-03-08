@@ -100,7 +100,7 @@ function SrtLabelingPage() {
   const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(() =>
     segments[0]?.id ?? null
   )
-  const [pixelsPerSecond, setPixelsPerSecond] = useState(100)
+  const [pixelsPerSecond, setPixelsPerSecond] = useState(200)
   const [promptText, setPromptText] = useState(() => buildGeminiPrompt())
   const [analysisStatus, setAnalysisStatus] = useState<'idle' | 'loading' | 'error'>('idle')
   const [analysisError, setAnalysisError] = useState<string | null>(null)
@@ -376,8 +376,11 @@ function SrtLabelingPage() {
   }
 
   const handleAddSegment = () => {
-    const newStart = currentTime
-    const newEnd = currentTime + 0.1
+    const activeSeg = segments.find(
+      (s) => currentTime >= s.startSec && currentTime <= s.endSec
+    )
+    const newStart = activeSeg ? activeSeg.endSec : currentTime
+    const newEnd = newStart + 0.1
     const overlapping = segments.some(
       (s) => s.startSec < newEnd && s.endSec > newStart
     )
@@ -388,6 +391,7 @@ function SrtLabelingPage() {
     const next = createSegment(labels[0] ?? '', newStart, newEnd)
     pushSegments((prev) => [...prev, next])
     setSelectedSegmentId(next.id)
+    handleSeek(newStart)
   }
 
   const handleRemoveSegment = (id: string) => {

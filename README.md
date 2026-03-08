@@ -142,3 +142,15 @@ startSec昇順、同値ならendSec昇順にソート
 10. 補足（この用途向けの推奨運用）
 
 start は動画先頭に必ず置きたい場合があるので、テンプレとして最初から1行入れてもよい（任意）
+
+
+## TODO
+
+- change label on timeline view
+- change active segment on create new segment
+- auto sync srt part with current playhaead
+- add button / shortcut to go to current active segment's start / end
+- no error on creating new segment near segments'end  (automatically create new segment with start = current active segment's end)
+- autosave srt to local storage
+- update add new segment ui
+- fix overlap on low zoom level on timeline view
