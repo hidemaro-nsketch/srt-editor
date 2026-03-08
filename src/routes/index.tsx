@@ -35,6 +35,26 @@ const createSegment = (seedLabel: string, startSec: number, endSec: number): Seg
   label: seedLabel,
 })
 
+const LABEL_COLORS: Record<string, string> = {
+  START: '210, 80%, 55%',
+  END: '0, 75%, 55%',
+  x: '160, 50%, 45%',
+  'munching start': '35, 85%, 55%',
+  'munching end': '280, 60%, 55%',
+}
+
+const labelToHsl = (label: string): string => {
+  if (LABEL_COLORS[label]) {
+    return LABEL_COLORS[label]
+  }
+  let hash = 0
+  for (let i = 0; i < label.length; i++) {
+    hash = label.charCodeAt(i) + ((hash << 5) - hash)
+  }
+  const h = ((hash % 360) + 360) % 360
+  return `${h}, 65%, 50%`
+}
+
 function SrtLabelingPage() {
   const mediaRef = useRef<HTMLVideoElement | null>(null)
   const rafRef = useRef<number | null>(null)
@@ -58,6 +78,7 @@ function SrtLabelingPage() {
     | null
   >(null)
   const srtInputRef = useRef<HTMLInputElement | null>(null)
+  const promptInputRef = useRef<HTMLInputElement | null>(null)
   const isScalingRef = useRef(false)
   const suppressAutoScrollRef = useRef(false)
   const [mediaUrl, setMediaUrl] = useState<string | null>(null)
@@ -197,6 +218,12 @@ function SrtLabelingPage() {
     () => [...segments].sort((a, b) => a.startSec - b.startSec || a.endSec - b.endSec),
     [segments]
   )
+
+  const inspectorIndex = useMemo(() => {
+    if (!inspectorSegment) return null
+    const idx = sortedSegments.findIndex((s) => s.id === inspectorSegment.id)
+    return idx >= 0 ? idx + 1 : null
+  }, [sortedSegments, inspectorSegment])
 
   const prevSegmentOfInspector = useMemo(() => {
     if (!inspectorSegment) return null
@@ -357,6 +384,7 @@ function SrtLabelingPage() {
   }
 
   const handleRemoveSegment = (id: string) => {
+    suppressAutoScrollRef.current = true
     pushSegments((prev) => {
       const next = prev.filter((segment) => segment.id !== id)
       setSelectedSegmentId((current) => {
@@ -367,6 +395,9 @@ function SrtLabelingPage() {
       })
       return next
     })
+    setTimeout(() => {
+      suppressAutoScrollRef.current = false
+    }, 100)
   }
 
   const handleAddLabel = useCallback(() => {
@@ -440,6 +471,39 @@ function SrtLabelingPage() {
       }
     },
     [pushSegments]
+  )
+
+  const handleSavePrompt = useCallback(() => {
+    const blob = new Blob([promptText], { type: 'text/plain;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = 'prompt.txt'
+    anchor.click()
+    URL.revokeObjectURL(url)
+  }, [promptText])
+
+  const handleLoadPrompt = useCallback(() => {
+    promptInputRef.current?.click()
+  }, [])
+
+  const handlePromptFileChange = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0]
+      if (!file) return
+      const reader = new FileReader()
+      reader.onload = () => {
+        const text = reader.result
+        if (typeof text === 'string') {
+          setPromptText(text)
+        }
+      }
+      reader.readAsText(file)
+      if (promptInputRef.current) {
+        promptInputRef.current.value = ''
+      }
+    },
+    []
   )
 
   const handlePointerMove = useCallback(
@@ -785,15 +849,38 @@ function SrtLabelingPage() {
             </div>
           </div>
           <div className="prompt-editor">
+            <input
+              ref={promptInputRef}
+              type="file"
+              className="sr-only"
+              accept=".txt,.md"
+              onChange={handlePromptFileChange}
+            />
             <div className="row-header">
               <span className="section-title">Prompt</span>
-              <button
-                type="button"
-                className="ghost-button small"
-                onClick={() => setPromptText(buildGeminiPrompt(labels))}
-              >
-                Reset
-              </button>
+              <div className="label-inline">
+                <button
+                  type="button"
+                  className="ghost-button small"
+                  onClick={handleLoadPrompt}
+                >
+                  Load
+                </button>
+                <button
+                  type="button"
+                  className="ghost-button small"
+                  onClick={handleSavePrompt}
+                >
+                  Save
+                </button>
+                <button
+                  type="button"
+                  className="ghost-button small"
+                  onClick={() => setPromptText(buildGeminiPrompt(labels))}
+                >
+                  Reset
+                </button>
+              </div>
             </div>
             <textarea
               className="prompt-textarea mono"
@@ -813,7 +900,12 @@ function SrtLabelingPage() {
 
           <div className="editor-panel">
             <div>
-              <div className="section-title">Active segment</div>
+              <div className="row-header">
+                <div className="section-title">Active segment</div>
+                {inspectorIndex !== null && (
+                  <span className="section-title mono">{inspectorIndex} / {segments.length}</span>
+                )}
+              </div>
               {inspectorSegment ? (
                 <div className="layout-stack">
                   <div>
@@ -992,7 +1084,12 @@ function SrtLabelingPage() {
             </button>
           </div>
         </div>
-        <div ref={laneRef} className="timeline-lane">
+        <div ref={laneRef} className="timeline-lane" onClick={(event) => {
+          if (event.target === event.currentTarget || (event.target as HTMLElement).closest('.timeline-ruler')) {
+            const nextTime = getTimeFromClientX(event.clientX)
+            handleSeek(nextTime)
+          }
+        }}>
           <div className="timeline-ruler" style={{ width: timelineWidth > 0 ? timelineWidth : '100%' }}>
             {timelineTicks.map((tick) => (
               <div
@@ -1030,6 +1127,8 @@ function SrtLabelingPage() {
                 style={{
                   width: `${Math.max(width, 4)}px`,
                   left: `${Math.max(left, 0)}px`,
+                  borderColor: `hsl(${labelToHsl(segment.label)})`,
+                  backgroundColor: `hsla(${labelToHsl(segment.label)}, 0.5)`,
                 }}
                 onPointerDown={(event) => startDrag(event, segment, 'move')}
                 onClick={() => setSelectedSegmentId(segment.id)}
