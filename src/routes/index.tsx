@@ -391,6 +391,7 @@ function SrtLabelingPage() {
     const next = createSegment(labels[0] ?? '', newStart, newEnd)
     pushSegments((prev) => [...prev, next])
     setSelectedSegmentId(next.id)
+    setCurrentTime(newStart)
     handleSeek(newStart)
   }
 
